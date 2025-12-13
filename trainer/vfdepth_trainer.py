@@ -19,6 +19,8 @@ class VFDepthTrainer:
         if rank == 0:
             self.logger = Logger(cfg, use_tb)
             self.depth_metric_names = self.logger.get_metric_names()
+            self.best_metric = {'abs_rel': float('inf'), 'rms': float('inf'), 'a1': 0.0}
+            self.best_paths = {'abs_rel': {}, 'rms': {}, 'a1': {}}
 
     def read_config(self, cfg):
         for attr in cfg.keys(): 
@@ -44,8 +46,10 @@ class VFDepthTrainer:
             
             # save model after each epoch using rank 0 gpu 
             if self.rank == 0:
-                model.save_model(self.epoch) # 保存 epoch 结束时的权重
-                print('-'*110) 
+                val_metric = self.validate(model)
+                metric_value = val_metric.get('abs_rel') if val_metric is not None else None
+                model.save_model(self.epoch, 'abs_rel', metric_value) # 这里可以改指标来保存
+                print('-'*110)
                 
             if self.ddp_enable:
                 dist.barrier()
@@ -117,16 +121,45 @@ class VFDepthTrainer:
             depth_eval_metric, depth_eval_median = self.logger.compute_depth_losses(inputs, outputs, vis_scale=True)
             self.logger.print_perf(depth_eval_metric, 'metric')
             self.logger.print_perf(depth_eval_median, 'median')
+            self._update_best_model(model, depth_eval_metric)
 
         self.logger.log_tb('val', inputs, outputs, losses, self.step)            
         del inputs, outputs, losses
         
         model.set_train()
+        return depth_eval_metric
         
+    def _update_best_model(self, model, metric_dict):
+        # 如果log的时候指标变好，保存新的模型权重
+        abs_rel = metric_dict['abs_rel']
+        if abs_rel < self.best_metric['abs_rel']:
+            self._remove_old_best('abs_rel')
+            self.best_paths['abs_rel'] = model.save_best_model(self.epoch, 'abs_rel', abs_rel)
+            self.best_metric['abs_rel'] = abs_rel
+            print(f"更新全局最优的模型，其中abs_rel为{self.best_metric['abs_rel']}")
+
+        # rmse = metric_dict['rms']
+        # if rmse < self.best_metric['rms']:
+        #     self._remove_old_best('rms')
+        #     self.best_paths['rms'] = model.save_best_model(self.epoch, 'rms', rmse)
+        #     self.best_metric['rms'] = rmse
+
+        # a1 = metric_dict['a1']
+        # if a1 > self.best_metric['a1']:
+        #     self._remove_old_best('a1')
+        #     self.best_paths['a1'] = model.save_best_model(self.epoch, 'a1', a1)
+        #     self.best_metric['a1'] = a1
+
+    def _remove_old_best(self, metric_name):
+        old_paths = self.best_paths.get(metric_name, {})
+        for _, path in old_paths.items():
+            if os.path.exists(path):
+                os.remove(path)
+
     @torch.no_grad()
     def evaluate(self, model, vis_results=False):
         """
-        This function evaluates models on full validation dataset.
+        此函数用于在完整的验证数据集上评估模型
         """
         eval_dataloader = model.eval_dataloader()
         

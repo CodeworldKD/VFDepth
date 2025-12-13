@@ -40,36 +40,46 @@ class DDADdatasetSF(DGPDataset):
 
     def generate_depth_map_sf(self, sample_idx, datum_idx, filename):
         """
-        This function follows structure of dgp_dataset/generate_depth_map in packnet-sfm. 
-        Due to the version issue with dgp, minor revision was made to get the correct value.
+        此函数遵循packnet-sfm中dgp_dataset/generate_depth_map的结构。 
+        由于dgp存在版本问题,我们进行了小幅修订以获取正确的值。
         """      
         # generate depth filename
         filename = '{}/{}.npz'.format(
             os.path.dirname(self.path), filename.format('depth/{}'.format(self.depth_type)))
-        # load and return if exists
+        # 1. 尝试加载现有的
         if os.path.exists(filename):
-            return np.load(filename, allow_pickle=True)['depth']
+            try:
+                return np.load(filename, allow_pickle=True)['depth']
+            except Exception as e:
+                print(f"[Auto-Fix] Deleting corrupted file: {filename}")
+                try:
+                    os.remove(filename)
+                except OSError:
+                    pass
         # otherwise, create, save and return
-        else:
-            # get pointcloud
-            scene_idx, sample_idx_in_scene, datum_indices = self.dataset.dataset_item_index[sample_idx]
-            pc_datum_data, _ = self.dataset.get_point_cloud_from_datum(
-                                scene_idx, sample_idx_in_scene, self.depth_type)
+        # get pointcloud
+        scene_idx, sample_idx_in_scene, datum_indices = self.dataset.dataset_item_index[sample_idx]
+        pc_datum_data, _ = self.dataset.get_point_cloud_from_datum(
+                            scene_idx, sample_idx_in_scene, self.depth_type)
 
-            # create camera
-            camera_rgb = self.get_current('rgb', datum_idx)
-            camera_pose = self.get_current('pose', datum_idx)
-            camera_intrinsics = self.get_current('intrinsics', datum_idx)
-            camera = Camera(K=camera_intrinsics, p_cw=camera_pose.inverse())
-            
-            # generate depth map
-            world_points = pc_datum_data['pose'] * pc_datum_data['point_cloud']
-            depth = generate_depth_map(camera, world_points, camera_rgb.size[::-1])
-            
-            # save depth map
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
+        # create camera
+        camera_rgb = self.get_current('rgb', datum_idx)
+        camera_pose = self.get_current('pose', datum_idx)
+        camera_intrinsics = self.get_current('intrinsics', datum_idx)
+        camera = Camera(K=camera_intrinsics, p_cw=camera_pose.inverse())
+        
+        # generate depth map
+        world_points = pc_datum_data['pose'] * pc_datum_data['point_cloud']
+        depth = generate_depth_map(camera, world_points, camera_rgb.size[::-1])
+        
+        # save depth map
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        try:
             np.savez_compressed(filename, depth=depth)
-            return depth
+        except Exception as e:
+            print(f"[Warning] Failed to save depth map: {e}")
+            
+        return depth
     
     def get_filename_sf(self, sample_idx, datum_idx):
         """
