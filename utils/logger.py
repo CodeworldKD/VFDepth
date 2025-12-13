@@ -121,7 +121,7 @@ class Logger:
         """ 
         Log less frequently after the early phase steps
         """
-        early_phase = (step % self.log_frequency == 0) and (step < self.early_phase)
+        early_phase = (step % self.log_frequency == 0) and (step < self.early_phase) # 2000 step之前每 200step测试一次
         late_phase = step % self.late_log_frequency == 0
         return (early_phase or late_phase)
 

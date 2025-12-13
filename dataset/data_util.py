@@ -35,7 +35,7 @@ def img_loader(path):
 
 def mask_loader_scene(path, mask_idx, cam):
     """
-    This function loads mask that correspondes to the scene and camera.
+    该函数加载与场景和相机对应的mask。
     """
     fname = os.path.join(path, str(mask_idx), '{}_mask.png'.format(cam.upper()))    
     with open(fname, 'rb') as f:

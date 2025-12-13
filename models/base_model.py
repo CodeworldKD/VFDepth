@@ -43,6 +43,9 @@ class BaseModel:
             m.eval()
 
     def save_model(self, epoch):
+        """
+        保存模型权重和优化器权重,每个epoch最后的时刻调用
+        """
         curr_model_weights_dir = os.path.join(self.save_weights_root, f'weights_{epoch}')
         os.makedirs(curr_model_weights_dir, exist_ok=True)
 

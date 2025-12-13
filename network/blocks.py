@@ -79,6 +79,6 @@ def conv1d(in_planes, out_planes, kernel_size=3, stride=1, dilation=1, nonlin='L
     else:
         conv = nn.Conv1d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, dilation=dilation,
                       padding=((kernel_size - 1) * dilation) // 2, bias=True, padding_mode=padding_mode)        
-        bnorm = nn.Identity()        
+        bnorm = nn.Identity()  #       
         
     return nn.Sequential(conv, bnorm, act)        

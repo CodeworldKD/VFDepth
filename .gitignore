@@ -8,3 +8,5 @@
 results
 input_data
 *.pyc
+article
+.vscode

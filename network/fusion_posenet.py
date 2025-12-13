@@ -46,27 +46,30 @@ class FusedPoseNet(nn.Module):
         for cam in range(self.num_cams):
             outputs[('cam', cam)] = {}
 
-        lev = self.fusion_level
+        lev = self.fusion_level # 2
 
         # packed images for surrounding view
-        cur_image = inputs[('color_aug', frame_ids[0], 0)]
-        next_image = inputs[('color_aug', frame_ids[1], 0)]
+        # 一次输入包括前后时序的6*3=18张图片，如果batchsiez = 2 总共36张图片
+        cur_image = inputs[('color_aug', frame_ids[0], 0)]  # [b,6,3,h,w] 当前帧
+        next_image = inputs[('color_aug', frame_ids[1], 0)] # [b,6,3,h,w] 下一帧
         
-        pose_images = torch.cat([cur_image, next_image], 2)
-        packed_pose_images = pack_cam_feat(pose_images)
+        pose_images = torch.cat([cur_image, next_image], 2) # [b,6,6,h,w] 把时间维度的图片拼接在channel维度上
+        packed_pose_images = pack_cam_feat(pose_images) # [b*6, 6, h, w] 打包 Batch 和 Camera 维度
         
-        packed_feats = self.encoder(packed_pose_images)
+        packed_feats = self.encoder(packed_pose_images) # 图像编码器
         
         # aggregate feature H / 2^(lev+1) x W / 2^(lev+1)
         _, _, up_h, up_w = packed_feats[lev].size()
         
+        # packed_feats[lev:lev+1]   [b*6,128,h/8,w/8]   128+256+512=896
         packed_feats_list = packed_feats[lev:lev+1] \
                         + [F.interpolate(feat, [up_h, up_w], mode='bilinear', align_corners=True) for feat in packed_feats[lev+1:]]           
 
-        packed_feats_agg = self.conv1x1(torch.cat(packed_feats_list, dim=1))         
-        feats_agg = unpack_cam_feat(packed_feats_agg, self.batch_size, self.num_cams)
+        packed_feats_agg = self.conv1x1(torch.cat(packed_feats_list, dim=1))       # [b*6,256,h/8,w/8]   
+        feats_agg = unpack_cam_feat(packed_feats_agg, self.batch_size, self.num_cams) # [b, N_cam, 256, h/8, w/8]
     
         # fusion_net, backproject each feature into the 3D voxel space
-        bev_feat = self.fusion_net(inputs, feats_agg)        
-        axis_angle, translation = self.pose_decoder([[bev_feat]])
+        bev_feat = self.fusion_net(inputs, feats_agg)        # [b,128,25,25]
+        axis_angle, translation = self.pose_decoder([[bev_feat]]) # [b, 1, 1, 3] [b, 1, 1, 3]
         return axis_angle, torch.clamp(translation, -4.0, 4.0) # for DDAD dataset
+        # clamp强制将预测出的相机平移量的每一个分量（x, y, z）都限制在 [-4.0, 4.0] 之间

@@ -19,6 +19,7 @@ class Pose:
     def compute_pose(self, net, inputs):
         """
         This function computes multi-camera posse in accordance with the network structure.
+        pose是六个字典的列表, key为('cam', 0/1/2..., )，表示每个摄像头的位姿,每个元素里面又是一个字典,key为('cam_T_cam', 0, -1)和 ('cam_T_cam', 0, 1)表示相对于参考摄像头0的位姿变换矩阵
         """
         if self.pose_model == 'fusion':
             pose = self.get_single_pose(net, inputs, None)
@@ -34,11 +35,11 @@ class Pose:
         This function computes pose for a single camera.
         """
         output = {}
-        for f_i in self.frame_ids[1:]:
+        for f_i in self.frame_ids[1:]: # frame_ids = [0, -1, 1]
             # To maintain ordering we always pass frames in temporal order
             frame_ids = [-1, 0] if f_i < 0 else [0, 1]
-            axisangle, translation = net(inputs, frame_ids, cam)
-            output[('cam_T_cam', 0, f_i)] = vec_to_matrix(axisangle[:, 0], translation[:, 0], invert=(f_i < 0))            
+            axisangle, translation = net(inputs, frame_ids, cam) # [b,1,1,3] [b,1,1,3] 
+            output[('cam_T_cam', 0, f_i)] = vec_to_matrix(axisangle[:, 0], translation[:, 0], invert=(f_i < 0))       # [b,4,4]        axisangle[:, 0] 从 (b,1,1,3)取index 0 变成 (b,1,3)  
         return output
         
     def distribute_pose(self, poses, exts, exts_inv):

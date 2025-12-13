@@ -1,0 +1,118 @@
+{
+  "description": "Key tensors for stepping through VFDepth forward propagation on the DDAD surround-fusion config (Kim et al., NeurIPS'22). All shapes assume batch_size=1, num_cams=6, image size 3x384x640, fusion_level=2. 若本地没有真实 DDAD 数据，可使用合成数据集 (tools/make_debug_batch --synthetic) 复现同样的维度。",
+  "input_spec": {
+    "num_cams": 6,
+    "image_resolution": [3, 384, 640],
+    "voxel_size_xyz": [100, 100, 20],
+    "voxel_unit_m": [1.0, 1.0, 1.5],
+    "proj_depth_bins": 50,
+    "scales": [0],
+    "frame_ids": [0, -1, 1]
+  },
+  "commands": {
+    "sample_batch_real": "python tools/make_debug_batch.py --config_file ./configs/ddad/ddad_surround_fusion.yaml --split val --batch_size 1 --batch_index 0 --output ./debug/ddad_val_batch.pt",
+    "sample_batch_synthetic": "python tools/make_debug_batch.py --config_file ./configs/ddad/ddad_surround_fusion.yaml --split val --batch_size 1 --batch_index 0 --synthetic --output ./debug/ddad_val_batch.pt",
+    "load_batch_snippet": "batch = torch.load('./debug/ddad_val_batch.pt'); inputs = {k: v.cuda() if torch.is_tensor(v) else v for k, v in batch.items()}",
+    "register_hook_snippet": "handles.append(module.register_forward_hook(lambda m, inp, out: print(name, tuple(out.shape))))"
+  },
+  "watch_points": [
+    {
+      "stage": "Surround view stacking",
+      "location": "network/fusion_depthnet.py:52-67",
+      "tensor": "sf_images / packed_input",
+      "expected_shape": "[1, 6, 3, 384, 640] -> pack_cam_feat -> [6, 3, 384, 640]",
+      "explanation": "Stack augmented RGBs for all cameras and collapse cam dimension into the batch before the ResNet encoder."
+    },
+    {
+      "stage": "ResNet feature pyramid",
+      "location": "network/fusion_depthnet.py:58-68",
+      "tensor": "packed_feats[level>=2]",
+      "expected_shape": "level2: [6, 128, 48, 80]; level3(up): [6, 256, 48, 80]; level4(up): [6, 512, 48, 80]",
+      "explanation": "ResNet-18 features from level 2 onward are upsampled to a common 1/8 resolution before fusion."
+    },
+    {
+      "stage": "2D feature aggregation",
+      "location": "network/fusion_depthnet.py:63-69",
+      "tensor": "packed_feats_agg / feats_agg",
+      "expected_shape": "packed_feats_agg: [6, 256, 48, 80]; feats_agg after unpack: [1, 6, 256, 48, 80]",
+      "explanation": "A 1x1 conv mixes the multi-scale stack into the volumetric fusion input channels."
+    },
+    {
+      "stage": "Voxel grid definition",
+      "location": "network/volumetric_fusionnet.py:20-41",
+      "tensor": "voxel_pts",
+      "expected_shape": "[1, 4, 200000]",
+      "explanation": "3D coordinates (x,y,z,1) of each voxel spanning 100x100m in the ground plane and 20 bins in height."
+    },
+    {
+      "stage": "Back-project camera features",
+      "location": "network/volumetric_fusionnet.py:116-165",
+      "tensor": "voxel_feat",
+      "expected_shape": "[1, 64, 200000]",
+      "explanation": "Each voxel pools per-camera features (plus relative depth) while masking self-occluded areas; overlap/non-overlap regions use separate 1x1 convs."
+    },
+    {
+      "stage": "Project fused 3D feat back to images",
+      "location": "network/volumetric_fusionnet.py:232-267",
+      "tensor": "proj_feats / fusion_dict['proj_feat']",
+      "expected_shape": "per cam: [1, 128, 48, 80]; packed: [6, 128, 48, 80]",
+      "explanation": "3D features are sampled along 50 depth bins per pixel and squeezed with convs to become 2D feature maps per view."
+    },
+    {
+      "stage": "Depth decoder outputs",
+      "location": "network/fusion_depthnet.py:73-97",
+      "tensor": "packed_depth_outputs[('disp',0)] and unpacked per camera",
+      "expected_shape": "packed: [6, 1, 384, 640]; per camera: [1, 1, 384, 640]",
+      "explanation": "Multi-scale decoder upsamples from 1/8 resolution to the full image size to predict disparity in [0,1]."
+    },
+    {
+      "stage": "Depth scaling",
+      "location": "models/vfdepth.py:263-288",
+      "tensor": "outputs[('cam',cam)][('depth',0)]",
+      "expected_shape": "[1, 1, 384, 640]",
+      "explanation": "Disparity is converted to metric depth using min/max depth and the focal length from per-camera intrinsics."
+    },
+    {
+      "stage": "Pose encoder input",
+      "location": "network/fusion_posenet.py:51-57",
+      "tensor": "pose_images",
+      "expected_shape": "[1, 6, 6, 384, 640] -> pack_cam_feat -> [6, 6, 384, 640]",
+      "explanation": "Current and adjacent frames are concatenated along channels so the pose network sees appearance changes."
+    },
+    {
+      "stage": "Pose BEV feature",
+      "location": "network/fusion_posenet.py:63-71",
+      "tensor": "bev_feat",
+      "expected_shape": "[1, 128, 100, 100]",
+      "explanation": "The VFNet pose branch averages camera features in voxels, reshapes them as a BEV map (y/x plane) and reduces channels before the pose decoder."
+    },
+    {
+      "stage": "Pose decoder output",
+      "location": "network/fusion_posenet.py:69-72",
+      "tensor": "axis_angle, translation",
+      "expected_shape": "axis_angle: [6, 1, 3]; translation: [6, 1, 3]",
+      "explanation": "Per-camera motions relative to the canonical frame are decoded then clamped within [-4m, 4m]."
+    },
+    {
+      "stage": "View synthesis (temporal)",
+      "location": "models/geometry/view_rendering.py:70-139",
+      "tensor": "target_view[('color', frame_id, scale)] and masks",
+      "expected_shape": "[1, 3, 384, 640] for images; masks [1, 1, 384, 640]",
+      "explanation": "Depth-guided warping recreates neighbor frames; enabling intensity alignment shows the chromatic normalization over overlap regions."
+    },
+    {
+      "stage": "View synthesis (spatial overlap)",
+      "location": "models/geometry/view_rendering.py:140-199",
+      "tensor": "target_view[('overlap', frame_id, scale)]",
+      "expected_shape": "[1, 3, 384, 640]",
+      "explanation": "Neighbor cameras' images are warped into the reference view to supervise overlapping FoV regions."
+    },
+    {
+      "stage": "Loss bookkeeping",
+      "location": "models/losses/multi_cam_loss.py:21-110",
+      "tensor": "target_view[('reproj_loss',0)], ('overlap_mask', frame,0), etc.",
+      "expected_shape": "Per loss map: [1, 1, 384, 640]",
+      "explanation": "Photometric, smoothness, spatio(temporal) and pose-consistency losses are accumulated with masks (auto-masking, overlap, reprojection)."
+    }
+  ]
+}

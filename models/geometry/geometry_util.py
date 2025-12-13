@@ -8,26 +8,27 @@ from pytorch3d.transforms import axis_angle_to_matrix
 def vec_to_matrix(rot_angle, trans_vec, invert=False):
     """
     This function transforms rotation angle and translation vector into 4x4 matrix.
+    将 6自由度(6-DoF)的位姿向量(3个旋转参数 + 3个平移参数)转换成标准的 4*4 齐次变换矩阵
     """
     # initialize matrices
-    b, _, _ = rot_angle.shape
+    b, _, _ = rot_angle.shape # [b,1,3]
     R_mat = torch.eye(4).repeat([b, 1, 1]).to(device=rot_angle.device)
     T_mat = torch.eye(4).repeat([b, 1, 1]).to(device=rot_angle.device)
 
-    R_mat[:, :3, :3] = axis_angle_to_matrix(rot_angle).squeeze(1)
-    t_vec = trans_vec.clone().contiguous().view(-1, 3, 1)
+    R_mat[:, :3, :3] = axis_angle_to_matrix(rot_angle).squeeze(1) # [b,4,4]    (b, 1, 3, 3).squeeze(1) 去掉第一维 --> [b, 3, 3]
+    t_vec = trans_vec.clone().contiguous().view(-1, 3, 1) # [b,3,1]
 
     if invert == True:
         R_mat = R_mat.transpose(1,2)
         t_vec = -1 * t_vec
 
-    T_mat[:, :3,  3:] = t_vec
+    T_mat[:, :3,  3:] = t_vec  # [b,4,4]
 
     if invert == True:
         P_mat = torch.matmul(R_mat, T_mat)
     else :
-        P_mat = torch.matmul(T_mat, R_mat)
-    return P_mat
+        P_mat = torch.matmul(T_mat, R_mat)  # 如果你有一个点 𝑥，想先对它进行旋转，再进行平移：x' = T * R * x
+    return P_mat   # [b,4,4]
 
 
 class Projection(nn.Module):

@@ -137,7 +137,7 @@ class VFDepthAlgo(BaseModel):
             'crop_eval_borders': ()
         }
 
-        # construct validation dataset
+        # 构建验证数据集
         val_dataset = construct_dataset(cfg, 'val', **_augmentation)
 
         dataloader_opts = {
@@ -208,7 +208,7 @@ class VFDepthAlgo(BaseModel):
         This function sets dataloader for validation in training.
         """          
         # pre-calculate inverse of the extrinsic matrix
-        inputs['extrinsics_inv'] = torch.inverse(inputs['extrinsics'])
+        inputs['extrinsics_inv'] = torch.inverse(inputs['extrinsics']) # [b, N_cam, 4, 4]
         
         # init dictionary 
         outputs = {}
@@ -225,7 +225,7 @@ class VFDepthAlgo(BaseModel):
         if self.syn_visualize:
             outputs['disp_vis'] = depth_feats['disp_vis']
             
-        self.compute_depth_maps(inputs, outputs)
+        self.compute_depth_maps(inputs, outputs) # 将网络预测的“归一化视差disp”转化为“真实物理深度Metric Depth”的关键后处理步骤
         return outputs
 
     def predict_pose(self, inputs):      
@@ -262,11 +262,12 @@ class VFDepthAlgo(BaseModel):
     
     def compute_depth_maps(self, inputs, outputs):     
         """
+        遍历所有相机和所有尺度，把网络输出的 disp全部转成 depth
         This function computes depth map for each viewpoint.
         """                  
         source_scale = 0
         for cam in range(self.num_cams):
-            ref_K = inputs[('K', source_scale)][:, cam, ...]
+            ref_K = inputs[('K', source_scale)][:, cam, ...] # 有四个内参是为了对应四个尺度的特征图 去了cam index的内参 形状[2, 4, 4]
             for scale in self.scales:
                 disp = outputs[('cam', cam)][('disp', scale)]
                 outputs[('cam', cam)][('depth', scale)] = self.to_depth(disp, ref_K)
@@ -276,6 +277,7 @@ class VFDepthAlgo(BaseModel):
     
     def to_depth(self, disp_in, K_in):        
         """
+        范围映射 -> 上采样 -> 求倒数 -> 焦距缩放
         This function transforms disparity value into depth map while multiplying the value with the focal length.
         """
         min_disp = 1/self.max_depth
@@ -284,8 +286,12 @@ class VFDepthAlgo(BaseModel):
 
         disp_in = F.interpolate(disp_in, [self.height, self.width], mode='bilinear', align_corners=False)
         disp = min_disp + disp_range * disp_in
-        depth = 1/disp
+        depth = 1/disp # 转为深度，这里深度是 1.5-200 m
         return depth * K_in[:, 0:1, 0:1].unsqueeze(2)/self.focal_length_scale
+        # 焦距缩放 K_in [2, 6, 4] K_in[:, 0:1, 0:1].unsqueeze(2)表示当前相机的焦距 f_x，规范焦距focal_length_scale = 300
+        # 在针孔相机模型中，物体在图像上的大小 h 与距离 Z 和焦距 f 的关系是 h正比 f/Z。也就是说，Z正比于 f/h。预测的 disp 其实是“归一化视差”：网络只输出一个介于 [min_disp, max_disp] 的无量纲值，默认假设所有相机的焦距一致。如果直接 depth = 1 / disp，同一物体在不同焦距的摄像头下就会出现尺度不一致的问题。为了解决这个“不同相机内参导致的尺度漂移”，论文中提出了一个简单的“focal length scaling”（焦距归一化）
+        # 如果网络只看图像（即只知道物体在图上的大小 h），它是无法区分“近处的小焦距拍摄”和“远处的大焦距拍摄”的。如果直接让网络预测真实深度 Z，对于不同焦距的相机（比如广角 vs 长焦），网络必须学会针对每个相机背诵不同的映射规则，这很难泛化。
+        # 如果当前相机的实际焦距 fx 比参考焦距大，最终深度会按比例增大 乘上 fx/300；反之则减小。这样一来，网络只需要学会一个“统一的”从图像大小 h 到归一化视差 disp 的映射规则即可，不同相机间的尺度漂移问题也迎刃而解。就是把网络学到的“归一化视差”变回真实世界的绝对深度，同时自动适配不同摄像头的内参差异
     
     def compute_losses(self, inputs, outputs):
         """

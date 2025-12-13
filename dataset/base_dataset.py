@@ -45,6 +45,13 @@ def construct_dataset(cfg, mode, **kwargs):
             cfg['data']['data_path'], mode,
             **dataset_args            
         )
+    elif cfg['data']['dataset'] == 'synthetic':
+        from dataset.synth_dataset import SyntheticSurroundDataset
+        dataset = SyntheticSurroundDataset(
+            cfg,
+            mode,
+            **kwargs
+        )
     else:
         raise ValueError('Unknown dataset: ' + cfg['data']['dataset'])
     return dataset

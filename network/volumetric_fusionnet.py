@@ -42,8 +42,8 @@ class VFNet(nn.Module):
         # depth fusion(process overlap and non-overlap regions)
         if model == 'depth':
             # voxel - preprocessing layer
-            self.v_dim_o = [(feat_in_dim + 1) * 2] + self.voxel_pre_dim
-            self.v_dim_no = [feat_in_dim + 1] + self.voxel_pre_dim
+            self.v_dim_o = [(feat_in_dim + 1) * 2] + self.voxel_pre_dim # [514, 64]
+            self.v_dim_no = [feat_in_dim + 1] + self.voxel_pre_dim # [257, 64]
             
             self.conv_overlap = conv1d(self.v_dim_o[0], self.v_dim_o[1], kernel_size=1) 
             self.conv_non_overlap = conv1d(self.v_dim_no[0], self.v_dim_no[1], kernel_size=1) 
@@ -115,26 +115,26 @@ class VFNet(nn.Module):
 
     def backproject_into_voxel(self, feats_agg, input_mask, intrinsics, extrinsics_inv):
         """
-        This function backprojects 2D features into 3D voxel coordinate using intrinsic and extrinsic of each camera.
+        该函数使用每个相机的内外参将 2D 特征反投影到 3D 体素坐标中.
         Self-occluded regions are removed by using the projected mask in 3D voxel coordinate.
         """
         voxel_feat_list = []
         voxel_mask_list = []
-        
+        # feats_agg [b, N_cam, 256, h/8, w/8]
         for cam in range(self.num_cams):
-            feats_img = feats_agg[:, cam, ...]
+            feats_img = feats_agg[:, cam, ...] # [b, c, h/8, w/8]
             _, _, h_dim, w_dim = feats_img.size()
         
-            mask_img = input_mask[:, cam, ...]            
-            mask_img = F.interpolate(mask_img, [h_dim, w_dim], mode='bilinear', align_corners=True)            
+            mask_img = input_mask[:, cam, ...]    # [b,1,h,w]        
+            mask_img = F.interpolate(mask_img, [h_dim, w_dim], mode='bilinear', align_corners=True) # [b,1,h/8,w/8]
             
             # 3D points in the voxel grid -> 3D points referenced at each view. [b, 3, n_voxels]
-            ext_inv_mat = extrinsics_inv[:, cam, :3, :]
-            v_pts_local = torch.matmul(ext_inv_mat, self.voxel_pts)
-
+            ext_inv_mat = extrinsics_inv[:, cam, :3, :] # [b, 3, 4]
+            v_pts_local = torch.matmul(ext_inv_mat, self.voxel_pts)  # voxel_pts: [b, 4, n_voxels 200000] -> v_pts_local: [b, 3, n_voxels] 世界坐标系到相机坐标系
+ 
             # calculate pixel coordinate that each point are projected in the image. [b, n_voxels, 1, 2]
-            K_mat = intrinsics[:, cam, :, :]
-            pix_coords = self.calculate_sample_pixel_coords(K_mat, v_pts_local, w_dim, h_dim)
+            K_mat = intrinsics[:, cam, :, :] # [2,4,4] 内参被表示为 4*4 是为了齐次计算
+            pix_coords = self.calculate_sample_pixel_coords(K_mat, v_pts_local, w_dim, h_dim) # [b, n_voxels, 1, 2]  相机坐标系到像素坐标系
 
             # compute validity mask. [b, 1, n_voxels]
             valid_mask = self.calculate_valid_mask(mask_img, pix_coords, v_pts_local)
@@ -142,24 +142,26 @@ class VFNet(nn.Module):
             # retrieve each per-pixel feature. [b, feat_dim, n_voxels, 1]
             feat_warped = F.grid_sample(feats_img, pix_coords, mode='bilinear', padding_mode='zeros', align_corners=True)            
             # concatenate relative depth as the feature. [b, feat_dim + 1, n_voxels]
+            # v_pts_local[:, 2:3, :]/(self.voxel_size[0] 索引 2 代表 Z轴，在相机坐标系中，Z 就是深度（Depth），即体素距离相机的垂直距离，并将这一维度进行归一化
             feat_warped = torch.cat([feat_warped.squeeze(-1), v_pts_local[:, 2:3, :]/(self.voxel_size[0])], dim=1)
             feat_warped = feat_warped * valid_mask.float()
             
-            voxel_feat_list.append(feat_warped)
+            voxel_feat_list.append(feat_warped) # 有六个元素，每个都是 [b, feat_dim+1, n_voxels]
             voxel_mask_list.append(valid_mask)
         
         # compute overlap region
-        voxel_mask_count = torch.sum(torch.cat(voxel_mask_list, dim=1), dim=1, keepdim=True)
+        voxel_mask_count = torch.sum(torch.cat(voxel_mask_list, dim=1), dim=1, keepdim=True) # [b, 1, n_voxels] 汇总这些 valid_mask 时可以得到每个体素被多少个摄像头覆盖
         
         if self.model == 'depth':
-            # discriminatively process overlap and non_overlap regions using different MLPs
+            # 对于处理重叠和非重叠区域使用不同的MLP
             voxel_non_overlap = self.preprocess_non_overlap(voxel_feat_list, voxel_mask_list, voxel_mask_count)
             voxel_overlap = self.preprocess_overlap(voxel_feat_list, voxel_mask_list, voxel_mask_count)
-            voxel_feat = voxel_non_overlap + voxel_overlap
+            voxel_feat = voxel_non_overlap + voxel_overlap # [b, 64, n_voxels]
             
         elif self.model == 'pose':
-            voxel_feat = torch.sum(torch.stack(voxel_feat_list, dim=1), dim=1, keepdim=False)
-            voxel_feat = voxel_feat/(voxel_mask_count+1e-7)
+            # 简单地对所有摄像头的体素特征进行平均融合，不走MLP
+            voxel_feat = torch.sum(torch.stack(voxel_feat_list, dim=1), dim=1, keepdim=False) # [b, feat_dim+1, n_voxels] 将所有摄像头的体素特征相加融合
+            voxel_feat = voxel_feat/(voxel_mask_count+1e-7) # 归一化
             
         return voxel_feat
 
@@ -184,19 +186,20 @@ class VFNet(nn.Module):
         """
         This function creates valid mask in voxel coordinate by projecting self-occlusion mask to 3D voxel coords. 
         """
-        # compute validity mask, [b, 1, n_voxels, 1]
+        # compute validity mask, [b, 1, n_voxels, 1] 返回的mask_selfocc是布尔张量
         mask_selfocc = (F.grid_sample(mask_img, pix_coords, mode='nearest', padding_mode='zeros', align_corners=True) > 0.5)
         # discard points behind the camera, [b, 1, n_voxels]
-        mask_depth = (v_pts_local[:, 2:3, :] > 0) 
+        mask_depth = (v_pts_local[:, 2:3, :] > 0) # 判断深度一定要>0
         # compute validity mask, [b, 1, n_voxels, 1]
         pix_coords_mask = pix_coords.permute(0, 3, 1, 2)
-        mask_oob = ~(torch.logical_or(pix_coords_mask > 1, pix_coords_mask < -1).sum(dim=1, keepdim=True) > 0)
+        mask_oob = ~(torch.logical_or(pix_coords_mask > 1, pix_coords_mask < -1).sum(dim=1, keepdim=True) > 0) # 判断体素是否在图像内
         valid_mask = mask_selfocc.squeeze(-1) * mask_depth * mask_oob.squeeze(-1)
         return valid_mask
     
     def preprocess_non_overlap(self, voxel_feat_list, voxel_mask_list, voxel_mask_count):
         """
         This function applies 1x1 convolutions to features from non-overlapping features.
+        用 1x1 卷积成为MLP是因为这样省去了维度转置, 计算效率更高
         """
         non_overlap_mask = (voxel_mask_count == 1)
         voxel = sum(voxel_feat_list)
@@ -208,11 +211,11 @@ class VFNet(nn.Module):
 
     def preprocess_overlap(self, voxel_feat_list, voxel_mask_list, voxel_mask_count):
         """
-        This function applies 1x1 convolutions on overlapping features.
+        该函数对重叠特征应用 1x1 卷积。
         Camera configuration [0,1,2] or [0,1,2,3,4,5]:
-                        3 1
-            rear cam <- 5   0 -> front cam
-                        4 2
+                          3 1
+            rear cam <- 5     0 -> front cam
+                          4 2
         """
         overlap_mask = (voxel_mask_count == 2)
         if self.num_cams == 3:
@@ -231,38 +234,43 @@ class VFNet(nn.Module):
 
     def project_voxel_into_image(self, voxel_feat, inv_K, extrinsics):
         """
+        利用已经在 3D 空间融合好的全局特征，为每个相机生成属于它自己视角的特征图，以便后续估计深度
         This function projects voxels into 2D image coordinate. 
         [b, feat_dim, n_voxels] -> [b, feat_dim, d, h, w]
         """        
         # define depth bin
         # [b, feat_dim, n_voxels] -> [b, feat_dim, d, h, w]
         b, feat_dim, _ = voxel_feat.size()
-        voxel_feat = voxel_feat.view(b, feat_dim, self.z_dim, self.y_dim, self.x_dim) 
+        voxel_feat = voxel_feat.view(b, feat_dim, self.z_dim, self.y_dim, self.x_dim)  # [b, 64, 20, 100, 100]
         
         proj_feats = []
+        # 构建相机视锥（Frustum Construction）
         for cam in range(self.num_cams):
             # construct 3D point grid for each view
-            cam_points = torch.matmul(inv_K[:, cam, :3, :3], self.pixel_grid)
-            cam_points = self.depth_grid * cam_points.view(self.batch_size, 3, 1, self.num_pix)
-            cam_points = torch.cat([cam_points, self.pixel_ones], dim=1) # [b, 4, n_depthbins, n_pixels]
-            cam_points = cam_points.view(self.batch_size, 4, -1) # [b, 4, n_depthbins * n_pixels]
+            # 发射射线（Pixel -> Camera Ray） 用内参逆矩阵将像素坐标(u, v, 1) 转换成归一化相机坐标系下的射线 (x_n, y_n, 1)
+            cam_points = torch.matmul(inv_K[:, cam, :3, :3], self.pixel_grid) # [b, 3, 3840]
+            #  沿射线采样深度（Ray -> Frustum Points） [b, 3, 50, 30*48]
+            cam_points = self.depth_grid * cam_points.view(self.batch_size, 3, 1, self.num_pix) 
+            cam_points = torch.cat([cam_points, self.pixel_ones], dim=1)   # [b, 4, n_depthbins, n_pixels] 将3D 欧氏坐标转换为齐次坐标，配合下一行代码的矩阵乘法，实现坐标系的刚体变换（旋转 + 平移）
+            cam_points = cam_points.view(self.batch_size, 4, -1) # [b, 4, n_depthbins * n_pixels]   [2,4,192000]
             
             # apply extrinsic: local 3D point -> global coordinate, [b, 3, n_depthbins * n_pixels]
-            points = torch.matmul(extrinsics[:, cam, :3, :], cam_points)
+            points = torch.matmul(extrinsics[:, cam, :3, :], cam_points) # [b, 3, 192000] 世界坐标系下（体素空间)的3D点
 
             # 3D grid_sample [b, n_voxels, 3], value: (x, y, z) point
-            grid = points.permute(0, 2, 1) 
+            grid = points.permute(0, 2, 1)  # [b, 192000, 3]
             
+            # 坐标归一化
             for i in range(3):
                 v_length = self.voxel_end_p[i] - self.voxel_str_p[i]
                 grid[:, :, i] = (grid[:, :, i] - self.voxel_str_p[i]) / v_length * 2. - 1.
                 
-            grid = grid.view(self.batch_size, self.proj_d_bins, self.img_h, self.img_w, 3)            
-            proj_feat = F.grid_sample(voxel_feat, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-            proj_feat = proj_feat.view(b, self.proj_d_bins * self.v_dim_o[-1], self.img_h, self.img_w)
+            grid = grid.view(self.batch_size, self.proj_d_bins, self.img_h, self.img_w, 3)          # [b, d, h/8, w/8, 3]  
+            proj_feat = F.grid_sample(voxel_feat, grid, mode='bilinear', padding_mode='zeros', align_corners=True) # 三线性插值采样 [b, 64, d, h/8, w/8] 这个64是体素融合后的特征维度
+            proj_feat = proj_feat.view(b, self.proj_d_bins * self.v_dim_o[-1], self.img_h, self.img_w) # [b, d*64, h/8, w/8]
             
             # conv, reduce dimension
-            proj_feat = self.reduce_dim(proj_feat)
+            proj_feat = self.reduce_dim(proj_feat) # [b, 128, h/8, w/8]
             proj_feats.append(proj_feat)
         return proj_feats
 
@@ -283,40 +291,40 @@ class VFNet(nn.Module):
             tform_mat[:, :, :3, :3] = angle_mat
             tform_mat = tform_mat.to(device=ext.device, dtype=ext.dtype)
 
-            ext_aug = tform_mat @ ext_aug
+            ext_aug = tform_mat @ ext_aug # 新外参 = 扰动矩阵 @ 旧外参
         return ext_aug
     
     def forward(self, inputs, feats_agg):
-        mask = inputs['mask']
-        K = inputs['K', self.fusion_level+1]
+        mask = inputs['mask'] # [b, n_cam, 1, h, w]
+        K = inputs['K', self.fusion_level+1] # [b, n_cam, 4, 4]
         inv_K = inputs['inv_K', self.fusion_level+1]
         extrinsics = inputs['extrinsics']
-        extrinsics_inv = inputs['extrinsics_inv']
+        extrinsics_inv = inputs['extrinsics_inv'] # [b, n_cam, 4, 4]
         
         fusion_dict = {}
         for cam in range(self.num_cams):
             fusion_dict[('cam', cam)] = {}
         
         # device, dtype check, match dtype and device
-        sample_tensor = feats_agg[0, 0, ...] # B, n_cam, c, h, w
+        sample_tensor = feats_agg[0, 0, ...] # B, n_cam, c, h/8, w/8  -> c,h/8,w/8
         self.type_check(sample_tensor)
             
-        # backproject each per-pixel feature into 3D space (or sample per-pixel features for each voxel)
-        voxel_feat = self.backproject_into_voxel(feats_agg, mask, K, extrinsics_inv)
+        # 体素中心投影到像素平面构建3D体素
+        voxel_feat = self.backproject_into_voxel(feats_agg, mask, K, extrinsics_inv) # 对post[b, 256+1, n_voxels]   对于depth经过MLP [b, 64, n_voxels]
             
         if self.model == 'depth':
             # for each pixel, collect voxel features -> output image feature     
-            proj_feats = self.project_voxel_into_image(voxel_feat, inv_K, extrinsics)
-            fusion_dict['proj_feat'] = pack_cam_feat(torch.stack(proj_feats, 1))
+            proj_feats = self.project_voxel_into_image(voxel_feat, inv_K, extrinsics) # [b, 128, h/8, w/8] * 6个相机
+            fusion_dict['proj_feat'] = pack_cam_feat(torch.stack(proj_feats, 1)) # [b*6,128,h/8,w/8]
  
             # with view augmentation
             if self.aug_depth:
                 # extrinsics
                 inputs['extrinsics_aug'] = self.augment_extrinsics(extrinsics)
-                proj_feats = self.project_voxel_into_image(voxel_feat, inv_K, inputs['extrinsics_aug'])
+                proj_feats = self.project_voxel_into_image(voxel_feat, inv_K, inputs['extrinsics_aug']) # 用【虚拟外参】对【同一个 3D 体素】进行投影
                 fusion_dict['proj_feat_aug'] = pack_cam_feat(torch.stack(proj_feats, 1))
 
-            # synthesis visualization
+            # synthesis visualization 给论文加一些可视化
             if self.syn_visualize:
                 def _get_proj_feat(inv_K, ang_x, ang_y, ang_z):
                     angle_mat = axis_angle_to_matrix(torch.tensor([ang_x, ang_y, ang_z])[None, :]) # 3x3
@@ -338,6 +346,6 @@ class VFNet(nn.Module):
         elif self.model == 'pose':
             b, c, _ = voxel_feat.shape      
             voxel_feat = voxel_feat.view(b, c*self.z_dim, 
-                                         self.y_dim, self.x_dim)            
-            bev_feat= self.reduce_dim(voxel_feat)
+                                         self.y_dim, self.x_dim)            # [b, 257 * 20 , 100, 100] 
+            bev_feat= self.reduce_dim(voxel_feat) # [b, 128, 25, 25]  两层卷积
             return bev_feat

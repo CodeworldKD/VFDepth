@@ -1,7 +1,7 @@
 ddp:
   ddp_enable: True
   world_size: 4
-  gpus: [0, 1, 2, 3]
+  gpus: [4, 5, 6, 7]
 
 model:  
   num_layers: 18
@@ -26,7 +26,7 @@ model:
   proj_d_end: 50
 
 data:
-  data_path: './input_data/DDAD/ddad_train_val/ddad.json'
+  data_path: '/data/lpc/data/data_lrp/MVS/DDAD/ddad_train_val/ddad.json'
   log_dir: './results/'
   dataset: 'ddad'
   back_context: 1
@@ -44,8 +44,8 @@ training:
   frame_ids: [0, -1, 1]
 
   # optimization
-  batch_size: 2
-  num_workers: 6
+  batch_size: 1
+  num_workers: 8 # 每张显卡 都会启动 8 个 CPU 进程来读数据
   learning_rate: 0.0001
   num_epochs: 20
   scheduler_step_size: 15
@@ -92,7 +92,7 @@ load:
   
 logging:
   early_phase: 2000
-  log_frequency: 100
+  log_frequency: 200 # 200个step val一次
   late_log_frequency: 1000
   save_frequency: 1
 

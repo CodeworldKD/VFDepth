@@ -50,7 +50,9 @@ class FusedDepthNet(nn.Module):
         lev = self.fusion_level
         
         # packed images for surrounding view
+        # 1. 堆叠所有视角的图片
         sf_images = torch.stack([inputs[('color_aug', 0, 0)][:, cam, ...] for cam in range(self.num_cams)], 1)
+        # 2. 打包 Batch 和 Camera 维度 (B, N_cam, C, H, W) -> (B*N_cam, C, H, W)
         packed_input = pack_cam_feat(sf_images)
         
         # feature encoder
@@ -58,6 +60,7 @@ class FusedDepthNet(nn.Module):
         # aggregate feature H / 2^(lev+1) x W / 2^(lev+1)
         _, _, up_h, up_w = packed_feats[lev].size()
         
+        # 上采样到 fusion level 的分辨率，然后拼接
         packed_feats_list = packed_feats[lev:lev+1] \
                         + [F.interpolate(feat, [up_h, up_w], mode='bilinear', align_corners=True) for feat in packed_feats[lev+1:]]        
         
@@ -67,10 +70,10 @@ class FusedDepthNet(nn.Module):
         # fusion_net, backproject each feature into the 3D voxel space
         fusion_dict = self.fusion_net(inputs, feats_agg)        
 
-        feat_in = packed_feats[:lev] + [fusion_dict['proj_feat']]    
-        packed_depth_outputs = self.decoder(feat_in)            
-            
-        depth_outputs = unpack_cam_feat(packed_depth_outputs, self.batch_size, self.num_cams)
+        feat_in = packed_feats[:lev] + [fusion_dict['proj_feat']]    # U-net
+        packed_depth_outputs = self.decoder(feat_in)         # 返回字典  'disp':[b*6, 1, 384, 640]   
+
+        depth_outputs = unpack_cam_feat(packed_depth_outputs, self.batch_size, self.num_cams) #  'disp':[b, 6, 1, 384, 640]   
         
         for cam in range(self.num_cams):
             for k in depth_outputs.keys():
@@ -91,7 +94,7 @@ class FusedDepthNet(nn.Module):
             for feat in proj_feats:
                 depth_outputs = self.decoder([feat])
                 outputs['disp_vis'] += depth_outputs[('disp', 0)]
-        return outputs
+        return outputs # 字典 ('cam', 0/1/2...): {'disp' :[b,1,h,w]}
     
         
 class DepthDecoder(nn.Module):
@@ -103,7 +106,7 @@ class DepthDecoder(nn.Module):
         super(DepthDecoder, self).__init__()
 
         self.num_output_channels = 1
-        self.scales = scales
+        self.scales = scales # 控制多尺度预测,Scale 0: 原始分辨率 (H  W) config是[0]
         self.use_skips = use_skips
         
         self.level_in = level_in
@@ -141,5 +144,22 @@ class DepthDecoder(nn.Module):
             x = torch.cat(x, 1)
             x = self.convs[('upconv', i, 1)](x)
             if i in self.scales:
-                outputs[('disp', i)] = self.sigmoid(self.convs[('dispconv', i)](x))                
+                outputs[('disp', i)] = self.sigmoid(self.convs[('dispconv', i)](x))               
         return outputs
+    
+"""
+归一化视差
+网络输出的不是“深度(depth)”，而是“相对视差(disparity)”。
+如果我们直接用 ReLU 或无激活函数去回归深度 $Z$（比如 0~200米)，会面临两个巨大的数学难题：
+1.无穷远问题：在自动驾驶场景中，天空、远处的山，其深度是接近无穷大的。
+2.数值约束与敏感度:深度值在近处(1米到2米)的变化非常重要,而在远处(100米到101米)的变化其实没那么重要。
+通过 Sigmoid -> 归一化视差 -> 倒数 这个链路，我们把一个原本是 [1.5, ∞)$ 的艰难回归问题（数值范围巨大且无上界），转化为了一个优雅的 [0, 1] 区间内的回归问题。
+这就是为什么绝大多数深度估计论文(Monodepth2, PackNet, VFDepth 等）都采用这种设计的原因。
+第一步:网络输出sigmoid  这是无单位的比例系数。
+第二步：物理视差映射
+disp = min_disp + (max_disp - min_disp) x sigmoid_output
+第三步：视差转深度(Inversion)
+Depth = 1/disp
+
+与cap对比在 PyTorch 中, clamp 函数在边界之外的梯度是 0导致预测超出边界不会梯度更新。
+"""

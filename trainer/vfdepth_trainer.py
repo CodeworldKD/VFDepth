@@ -2,7 +2,7 @@
 import time
 from collections import defaultdict
 from tqdm import tqdm
-
+import os
 import torch
 import torch.distributed as dist
 
@@ -38,13 +38,13 @@ class VFDepthTrainer:
         start_time = time.time()
         for self.epoch in range(self.num_epochs):
             if self.ddp_enable:
-                model.train_sampler.set_epoch(self.epoch) 
-                
+                model.train_sampler.set_epoch(self.epoch)     
+
             self.train(model, train_dataloader, start_time)
             
             # save model after each epoch using rank 0 gpu 
             if self.rank == 0:
-                model.save_model(self.epoch)
+                model.save_model(self.epoch) # 保存 epoch 结束时的权重
                 print('-'*110) 
                 
             if self.ddp_enable:
@@ -58,12 +58,26 @@ class VFDepthTrainer:
         This function trains models.
         """
         model.set_train()
-        for batch_idx, inputs in enumerate(data_loader):         
+        # --- 【适配显存修改点 1】设置累积步数 ---
+        accumulation_steps = 2 
+        
+        # 初始化梯度
+        model.optimizer.zero_grad(set_to_none=True)
+        process_bar = tqdm(data_loader)
+        for batch_idx, inputs in enumerate(process_bar):      
             before_op_time = time.time()
-            model.optimizer.zero_grad(set_to_none=True)
+            # --- 【适配显存修改点 2】不要在这里清空梯度，移到下面去 ---
+            # model.optimizer.zero_grad(set_to_none=True)
             outputs, losses = model.process_batch(inputs, self.rank)
-            losses['total_loss'].backward()
-            model.optimizer.step()
+            # losses['total_loss'].backward()
+            # 累积梯度
+            loss = losses['total_loss']/accumulation_steps
+            loss.backward()
+            # model.optimizer.step()
+            # 每隔 accumulation_steps 更新  
+            if (batch_idx + 1) % accumulation_steps == 0:
+                model.optimizer.step()
+                model.optimizer.zero_grad(set_to_none=True)
 
             if self.rank == 0: 
                 self.logger.update(
@@ -79,7 +93,7 @@ class VFDepthTrainer:
                     losses
                 )
 
-                if self.logger.is_checkpoint(self.step):
+                if self.logger.is_checkpoint(self.step): # 根据step打印结果
                     self.validate(model)
 
             if self.ddp_enable:
