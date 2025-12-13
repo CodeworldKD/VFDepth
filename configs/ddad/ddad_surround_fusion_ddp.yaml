@@ -1,7 +1,7 @@
 ddp:
   ddp_enable: True
   world_size: 4
-  gpus: [4, 5, 6, 7]
+  gpus: [0, 1, 2, 3]
 
 model:  
   num_layers: 18
@@ -27,7 +27,7 @@ model:
 
 data:
   data_path: '/data/lpc/data/data_lrp/MVS/DDAD/ddad_train_val/ddad.json'
-  log_dir: './results/'
+  log_dir: './results_1213/'
   dataset: 'ddad'
   back_context: 1
   forward_context: 1

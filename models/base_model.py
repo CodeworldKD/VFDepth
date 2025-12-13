@@ -1,4 +1,3 @@
-# Copyright (c) 2023 42dot. All rights reserved.
 import os
 import torch
 
@@ -41,22 +40,40 @@ class BaseModel:
         self.mode = 'val'
         for m in self.models.values():
             m.eval()
+    
+    def _format_model_filename(self, model_name, epoch=None, metric_name=None, metric_value=None):
+        metric_name = metric_name.replace('_', '') if metric_name is not None else None
 
-    def save_model(self, epoch):
-        """
-        保存模型权重和优化器权重,每个epoch最后的时刻调用
-        """
-        curr_model_weights_dir = os.path.join(self.save_weights_root, f'weights_{epoch}')
-        os.makedirs(curr_model_weights_dir, exist_ok=True)
+        parts = [model_name]
+        if metric_name is not None and metric_value is not None:
+            parts.append(f"{metric_name}_{metric_value:.3f}")
+        if epoch is not None:
+            parts.append(f"epoch{epoch}")
+        return '_'.join(parts) + '.pth'
+    
+    def _save_models(self, target_dir, epoch=None, metric_name=None, metric_value=None):
+        os.makedirs(target_dir, exist_ok=True)
 
+        model_paths = {}
         for model_name, model in self.models.items():
-            model_file_path = os.path.join(curr_model_weights_dir, f'{model_name}.pth')
+            model_file_name = self._format_model_filename(model_name, epoch, metric_name, metric_value)
+            model_file_path = os.path.join(target_dir, model_file_name)
             to_save = model.state_dict()
             torch.save(to_save, model_file_path)
-        
+            model_paths[model_name] = model_file_path
+        return model_paths
+
+    def save_model(self, epoch, metric_name=None, metric_value=None):
+        curr_model_weights_dir = os.path.join(self.save_weights_root, f'weights_{epoch}')
+        model_paths = self._save_models(curr_model_weights_dir, epoch, metric_name, metric_value)
         # save optimizer
         optim_file_path = os.path.join(curr_model_weights_dir, f'{_OPTIMIZER_NAME}.pth')
         torch.save(self.optimizer.state_dict(), optim_file_path)
+        return model_paths
+
+    def save_best_model(self, epoch, metric_name, metric_value, target_dir=None): # 这个返回的path没有 /weighs_epoch/
+        save_dir = self.save_weights_root if target_dir is None else target_dir
+        return self._save_models(save_dir, epoch, metric_name, metric_value)
 
     def load_weights(self):
         assert os.path.isdir(self.load_weights_dir), f'\tCannot find {self.load_weights_dir}'
