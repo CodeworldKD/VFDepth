@@ -1,5 +1,5 @@
 ddp:
-  ddp_enable: False
+  ddp_enable: True
   world_size: 1
   gpus: [0]
   
@@ -26,8 +26,8 @@ model:
   proj_d_end: 50
 
 data:
-  data_path: './input_data/DDAD/ddad_train_val/ddad.json'
-  log_dir: './results/'
+  data_path: '/data/lpc/data/data_lrp/MVS/DDAD/ddad_train_val/ddad.json'
+  log_dir: './results_1221/'
   dataset: 'ddad'
   back_context: 1
   forward_context: 1
@@ -44,10 +44,10 @@ training:
   frame_ids: [0, -1, 1]
   
   # optimization
-  batch_size: 2
+  batch_size: 1
   num_workers: 8
-  learning_rate: 0.0001
-  num_epochs: 20
+  learning_rate: 0.00005
+  num_epochs: 30
   scheduler_step_size: 15
 
   # model / loss setting
@@ -94,6 +94,6 @@ load:
   
 logging:
   early_phase: 2000
-  log_frequency: 100
+  log_frequency: 200
   late_log_frequency: 1000
   save_frequency: 1
