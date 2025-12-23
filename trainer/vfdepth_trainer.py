@@ -5,6 +5,7 @@ from tqdm import tqdm
 import os
 import torch
 import torch.distributed as dist
+from torch.cuda.amp import GradScaler, autocast
 
 from utils import Logger
 
@@ -16,6 +17,10 @@ class VFDepthTrainer:
     def __init__(self, cfg, rank, use_tb=True):
         self.read_config(cfg)
         self.rank = rank        
+        self.accumulation_steps = getattr(self, 'accumulation_steps', 2)
+        self.use_grad_accumulation = getattr(self, 'use_grad_accumulation', False)
+        self.use_amp = getattr(self, 'use_amp', False)
+        self.scaler = GradScaler(enabled=self.use_amp)
         if rank == 0:
             self.logger = Logger(cfg, use_tb)
             self.depth_metric_names = self.logger.get_metric_names()
@@ -46,10 +51,11 @@ class VFDepthTrainer:
             
             # save model after each epoch using rank 0 gpu 
             if self.rank == 0:
-                val_metric = self.validate(model)
-                metric_value = val_metric.get('abs_rel') if val_metric is not None else None
-                model.save_model(self.epoch, 'abs_rel', metric_value) # 这里可以改指标来保存
-                print('-'*110)
+                # val_metric = self.validate(model)
+                # metric_value = val_metric.get('abs_rel') if val_metric is not None else None
+                # model.save_model(self.epoch, 'abs_rel', metric_value) # 这里可以改指标来保存
+                model.save_model(self.epoch)
+                print(f'---------- 保存 {self.epoch} epoch模型-------------')
                 
             if self.ddp_enable:
                 dist.barrier()
@@ -62,26 +68,44 @@ class VFDepthTrainer:
         This function trains models.
         """
         model.set_train()
-        # --- 【适配显存修改点 1】设置累积步数 ---
-        accumulation_steps = 2 
-        
-        # 初始化梯度
-        model.optimizer.zero_grad(set_to_none=True)
+        accumulation_steps = max(1, self.accumulation_steps)
+        use_accum = self.use_grad_accumulation and accumulation_steps > 1
+        scaler = self.scaler
+        total_batches = len(data_loader)
+        if use_accum:
+            model.optimizer.zero_grad(set_to_none=True)
         process_bar = tqdm(data_loader)
         for batch_idx, inputs in enumerate(process_bar):      
             before_op_time = time.time()
-            # --- 【适配显存修改点 2】不要在这里清空梯度，移到下面去 ---
-            # model.optimizer.zero_grad(set_to_none=True)
-            outputs, losses = model.process_batch(inputs, self.rank)
-            # losses['total_loss'].backward()
-            # 累积梯度
-            loss = losses['total_loss']/accumulation_steps
-            loss.backward()
-            # model.optimizer.step()
-            # 每隔 accumulation_steps 更新  
-            if (batch_idx + 1) % accumulation_steps == 0:
-                model.optimizer.step()
+            if not use_accum:
                 model.optimizer.zero_grad(set_to_none=True)
+
+            with autocast(enabled=self.use_amp):
+                outputs, losses = model.process_batch(inputs, self.rank)
+                loss = losses['total_loss']
+                if use_accum:
+                    loss = loss/accumulation_steps
+
+            if self.use_amp:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            if use_accum:
+                should_step = ((batch_idx + 1) % accumulation_steps == 0) or ((batch_idx + 1) == total_batches)
+                if should_step:
+                    if self.use_amp:
+                        scaler.step(model.optimizer)
+                        scaler.update()
+                    else:
+                        model.optimizer.step()
+                    model.optimizer.zero_grad(set_to_none=True)
+            else:
+                if self.use_amp:
+                    scaler.step(model.optimizer)
+                    scaler.update()
+                else:
+                    model.optimizer.step()
 
             if self.rank == 0: 
                 self.logger.update(
@@ -111,6 +135,7 @@ class VFDepthTrainer:
     def validate(self, model):
         """
         This function validates models on validation dataset to monitor training process.
+        只跑了验证集的一个 batch
         """
         model.set_val()
         inputs = next(self.val_iter)

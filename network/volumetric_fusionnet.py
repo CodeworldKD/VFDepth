@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pytorch3d.transforms import axis_angle_to_matrix
+from torch.utils.checkpoint import checkpoint
 
 from .blocks import conv2d, conv1d, pack_cam_feat
 from utils import aug_depth_params
@@ -310,7 +311,10 @@ class VFNet(nn.Module):
         self.type_check(sample_tensor)
             
         # 体素中心投影到像素平面构建3D体素
-        voxel_feat = self.backproject_into_voxel(feats_agg, mask, K, extrinsics_inv) # 对post[b, 256+1, n_voxels]   对于depth经过MLP [b, 64, n_voxels]
+        if getattr(self, 'use_grad_checkpoint', False):
+            voxel_feat = checkpoint(self.backproject_into_voxel, feats_agg, mask, K, extrinsics_inv)
+        else:
+            voxel_feat = self.backproject_into_voxel(feats_agg, mask, K, extrinsics_inv) # 对post[b, 256+1, n_voxels]   对于depth经过MLP [b, 64, n_voxels]
             
         if self.model == 'depth':
             # for each pixel, collect voxel features -> output image feature     

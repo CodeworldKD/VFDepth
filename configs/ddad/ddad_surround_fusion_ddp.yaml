@@ -27,7 +27,7 @@ model:
 
 data:
   data_path: '/data/lpc/data/data_lrp/MVS/DDAD/ddad_train_val/ddad.json'
-  log_dir: './results_1213/'
+  log_dir: './results_1222/'
   dataset: 'ddad'
   back_context: 1
   forward_context: 1
@@ -44,11 +44,15 @@ training:
   frame_ids: [0, -1, 1]
 
   # optimization
-  batch_size: 1
+  batch_size: 2
+  accumulation_steps: 4
+  use_grad_accumulation: False
   num_workers: 8 # 每张显卡 都会启动 8 个 CPU 进程来读数据
   learning_rate: 0.0001
-  num_epochs: 20
-  scheduler_step_size: 15
+  num_epochs: 25
+  scheduler_step_size: 10
+  use_amp: False
+  use_grad_checkpoint: False
 
   # model / loss setting
   ## depth range
@@ -95,4 +99,3 @@ logging:
   log_frequency: 200 # 200个step val一次
   late_log_frequency: 1000
   save_frequency: 1
-
